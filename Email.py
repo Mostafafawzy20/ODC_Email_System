@@ -1,5 +1,8 @@
 import pandas as pd
-import pythoncom
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
 import time
 from datetime import datetime
 from typing import Tuple, Dict, Any, Optional, List
@@ -10,18 +13,9 @@ try:
 except ImportError:
     FPDF_AVAILABLE = False
 
-import sys
-
-if sys.platform == 'win32':
-    import pythoncom
-    import win32com.client
-else:
-    print("Skipping Windows-specific imports")
-
-
-
-
-image = r'C:\Users\mfsal575\Marriott International\EMEA Analytics - Documents\Analytics Repository\_python\ODC_Audit_Tracking\data\image001.png'
+# Load the image as bytes
+with open('static/image001.png', 'rb') as f:
+    IMAGE_DATA = f.read()
 
 def create_email_body(prop_code: str, group_data: pd.DataFrame, additional_info: str = "") -> str:
     try:
@@ -261,6 +255,60 @@ class EmailReport:
             'failed': sum(1 for s in self.statuses if s.status == 'Failed')
         }
 
+class EmailSender:
+    def __init__(self, smtp_server: str, smtp_port: int):
+        self.smtp_server = smtp_server
+        self.smtp_port = smtp_port
+        self._smtp = None
+
+    def connect(self, username: str, password: str):
+        """Connect to SMTP server"""
+        try:
+            self._smtp = smtplib.SMTP(self.smtp_server, self.smtp_port)
+            self._smtp.starttls()
+            self._smtp.login(username, password)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    def send_email(self, 
+                  to_address: str, 
+                  subject: str, 
+                  html_body: str, 
+                  from_address: str,
+                  bcc_address: str = None) -> Tuple[bool, str]:
+        """Send email using SMTP"""
+        try:
+            msg = MIMEMultipart('related')
+            msg['Subject'] = subject
+            msg['From'] = from_address
+            msg['To'] = to_address
+            if bcc_address:
+                msg['Bcc'] = bcc_address
+
+            # Create HTML part
+            html_part = MIMEText(html_body, 'html')
+            msg.attach(html_part)
+
+            # Attach image
+            img = MIMEImage(IMAGE_DATA)
+            img.add_header('Content-ID', '<instructions_image>')
+            msg.attach(img)
+
+            # Send email
+            self._smtp.send_message(msg)
+            return True, "Email sent successfully"
+        except Exception as e:
+            return False, f"Failed to send email: {str(e)}"
+
+    def close(self):
+        """Close SMTP connection"""
+        if self._smtp:
+            try:
+                self._smtp.quit()
+            except:
+                pass
+
 def load_and_prepare_data(missing_file: Any, emails_file: Any) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Load and prepare the missing files and emails data"""
     try:
@@ -303,281 +351,126 @@ def validate_hotel_data(hotel_code: str, missing_df: pd.DataFrame, emails_df: pd
     except Exception as e:
         return False, f"Validation error for hotel {hotel_code}: {str(e)}", None, None
 
-def safe_initialize_outlook() -> Tuple[Any, Optional[str]]:
-    """Initialize Outlook with proper COM threading"""
-    try:
-        pythoncom.CoInitialize()
-        outlook = win32.Dispatch("Outlook.Application")
-        namespace = outlook.GetNamespace("MAPI")
-        _ = namespace.GetDefaultFolder(6)
-        return outlook, None
-    except Exception as e:
-        pythoncom.CoUninitialize()
-        return None, f"Failed to initialize Outlook: {str(e)}"
-
-def cleanup_outlook(outlook: Any):
-    """Properly cleanup Outlook COM objects"""
-    try:
-        if outlook:
-            outlook.Quit()
-        pythoncom.CoUninitialize()
-    except:
-        pass
-
-def send_email_with_retry(
-    outlook: Any, 
-    to_address: str, 
-    subject: str, 
-    html_body: str,
-    max_retries: int = 3, 
-    delay: float = 2.0,
-    from_email: str = "",
-    bcc_email: Optional[str] = None
-) -> EmailProcessingResult:
-    """Send email with retry logic and proper error handling
-    
-    Args:
-        outlook: Outlook application instance
-        to_address: Recipient email address
-        subject: Email subject
-        html_body: HTML content of the email
-        max_retries: Maximum number of retry attempts
-        delay: Delay between retry attempts
-        from_email: Email address to send from
-        bcc_email: Email address to BCC
-    """
-    for attempt in range(max_retries):
-        try:
-            mail = outlook.CreateItem(0)
-            mail.To = to_address
-            if from_email:
-                mail.SentOnBehalfOfName = from_email
-            if bcc_email:
-                mail.BCC = bcc_email
-            mail.Subject = subject
-            mail.HTMLBody = html_body
-            
-            # Add image as inline attachment
-            attachment = mail.Attachments.Add(image)
-            attachment.PropertyAccessor.SetProperty(
-                "http://schemas.microsoft.com/mapi/proptag/0x3712001F", 
-                "instructions_image"
-            )
-            
-            mail.Send()
-            mail = None
-            time.sleep(delay)
-            
-            return EmailProcessingResult(
-                True, 
-                "Email sent successfully",
-                status=EmailStatus(
-                    hotel_code="",  # Will be set by calling function
-                    email_address=to_address,
-                    timestamp=datetime.now(),
-                    status="Success",
-                    message="Email sent successfully"
-                )
-            )
-            
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(delay * (attempt + 1))
-                continue
-            
-            return EmailProcessingResult(
-                False, 
-                f"Failed to send email after {max_retries} attempts: {str(e)}",
-                status=EmailStatus(
-                    hotel_code="",  # Will be set by calling function
-                    email_address=to_address,
-                    timestamp=datetime.now(),
-                    status="Failed",
-                    message=str(e)
-                )
-            )
-
 def process_single_notification(
     missing_df: pd.DataFrame, 
     emails_df: pd.DataFrame, 
     hotel_code: str, 
+    smtp_settings: Dict[str, Any],
     additional_info: str = "",
     delay: float = 2.0,
     from_email: str = "",
     bcc_email: str = None,
     force_template: str = None
 ) -> EmailProcessingResult:
-    """
-    Process and send notification for a single hotel
-    
-    Args:
-        missing_df: DataFrame containing missing files data
-        emails_df: DataFrame containing email addresses
-        hotel_code: Hotel property code
-        additional_info: Additional information to include in email
-        delay: Delay between email sends
-        from_email: Email address to send from
-        bcc_email: Email address to BCC
-        force_template: Force specific template ("standard" or "critical")
-    """
-    outlook = None
     try:
+        # Validate hotel data
         is_valid, error_message, hotel_data, email_address = validate_hotel_data(hotel_code, missing_df, emails_df)
         if not is_valid:
             return EmailProcessingResult(False, error_message)
         
         hotel_name = hotel_data['hotel'].iloc[0] if not hotel_data.empty else hotel_code
         
-        outlook, error = safe_initialize_outlook()
-        if error:
-            return EmailProcessingResult(False, f"Failed to initialize Outlook: {error}")
-        
-        # Use template selector with force_template parameter
+        # Create email content
         email_body = select_email_template(hotel_code, hotel_data, additional_info, force_template)
         
-        mail = outlook.CreateItem(0)
-        mail.To = email_address
-        if from_email:
-            mail.SentOnBehalfOfName = from_email
-        if bcc_email:
-            mail.BCC = bcc_email
-            
-        # Set subject based on template type or days missing
+        # Set subject based on template type
         if force_template == "critical" or hotel_data['days_missing'].max() > 28:
-            mail.Subject = f"CRITICAL: Long-term Missing ODC Files - {hotel_code} - {hotel_name}"
+            subject = f"CRITICAL: Long-term Missing ODC Files - {hotel_code} - {hotel_name}"
         else:
-            mail.Subject = f"Action required: Missing ODC Files Report - {hotel_code} - {hotel_name}"
-            
-        mail.HTMLBody = email_body
+            subject = f"Action required: Missing ODC Files Report - {hotel_code} - {hotel_name}"
+
+        # Initialize email sender
+        sender = EmailSender(smtp_settings['server'], smtp_settings['port'])
+        success, error = sender.connect(smtp_settings['username'], smtp_settings['password'])
         
-        # Add image as inline attachment
-        attachment = mail.Attachments.Add(image)
-        attachment.PropertyAccessor.SetProperty(
-            "http://schemas.microsoft.com/mapi/proptag/0x3712001F", 
-            "instructions_image"
-        )
-        
-        mail.Send()
-        
-        return EmailProcessingResult(
-            True, 
-            f"Notification sent successfully to {hotel_code} ({email_address})",
-            {'hotel_code': hotel_code, 'email': email_address}
-        )
-            
+        if not success:
+            return EmailProcessingResult(False, f"Failed to connect to SMTP server: {error}")
+
+        try:
+            # Send email
+            success, message = sender.send_email(
+                to_address=email_address,
+                subject=subject,
+                html_body=email_body,
+                from_address=from_email,
+                bcc_address=bcc_email
+            )
+
+            if success:
+                return EmailProcessingResult(
+                    True,
+                    f"Notification sent successfully to {hotel_code} ({email_address})",
+                    {'hotel_code': hotel_code, 'email': email_address}
+                )
+            else:
+                return EmailProcessingResult(False, message)
+        finally:
+            sender.close()
+
     except Exception as e:
         return EmailProcessingResult(False, f"Error processing notification for {hotel_code}: {str(e)}")
-    finally:
-        if outlook:
-            cleanup_outlook(outlook)
+
 def process_bulk_notifications(
     missing_df: pd.DataFrame,
     emails_df: pd.DataFrame,
     hotel_codes: List[str],
+    smtp_settings: Dict[str, Any],
     additional_info: str = "",
     batch_size: int = 10,
     delay_between_emails: float = 2.0,
     progress_callback: Optional[callable] = None,
     from_email: str = "",
-    bcc_email: Optional[str] = None,
-    force_template: Optional[str] = None
-) -> Tuple[List[EmailProcessingResult], EmailReport]:
-    """Process and send notifications for multiple hotels
-    
-    Args:
-        missing_df: DataFrame containing missing files data
-        emails_df: DataFrame containing email addresses
-        hotel_codes: List of hotel property codes
-        additional_info: Additional information to include in email
-        batch_size: Number of emails to send in each batch
-        delay_between_emails: Delay between email sends
-        progress_callback: Callback function to update progress
-        from_email: Email address to send from
-        bcc_email: Email address to BCC
-        force_template: Force specific template ("standard" or "critical")
-    """
-    results = []
+    bcc_email: str = None,
+    force_template: str = None
+) -> Tuple[bool, EmailReport]:
+    """Process and send notifications for multiple hotels"""
     report = EmailReport()
-    outlook = None
+    sender = None
     
     try:
-        outlook, error = safe_initialize_outlook()
-        if error:
-            return [EmailProcessingResult(False, error)], report
+        # Initialize email sender
+        sender = EmailSender(smtp_settings['server'], smtp_settings['port'])
+        success, error = sender.connect(smtp_settings['username'], smtp_settings['password'])
         
+        if not success:
+            return False, f"Failed to connect to SMTP server: {error}"
+
         total_hotels = len(hotel_codes)
         
-        for i in range(0, total_hotels, batch_size):
-            batch = hotel_codes[i:i + batch_size]
-            
-            for idx, hotel_code in enumerate(batch):
-                is_valid, error_message, hotel_data, email_address = validate_hotel_data(hotel_code, missing_df, emails_df)
-                
-                if not is_valid:
-                    status = EmailStatus(
-                        hotel_code=hotel_code,
-                        email_address="N/A",
-                        timestamp=datetime.now(),
-                        status="Failed",
-                        message=error_message
-                    )
-                    report.add_status(status)
-                    results.append(EmailProcessingResult(False, error_message, status=status))
-                    continue
-                
-                # Create email body using template selector
-                email_body = select_email_template(hotel_code, hotel_data, additional_info, force_template)
-                
-                # Set subject based on template type or days missing
-                hotel_name = hotel_data['hotel'].iloc[0] if not hotel_data.empty else hotel_code
-                if force_template == "critical" or hotel_data['days_missing'].max() > 28:
-                    subject = f"CRITICAL: Long-term Missing ODC Files - {hotel_code} - {hotel_name}"
-                else:
-                    subject = f"Action required: Missing ODC Files Report - {hotel_code} - {hotel_name}"
-                
-                # Send email with all parameters
-                result = send_email_with_retry(
-                    outlook=outlook,
-                    to_address=email_address,
-                    subject=subject,
-                    html_body=email_body,
-                    delay=delay_between_emails,
-                    from_email=from_email,
-                    bcc_email=bcc_email
-                )
-                
-                if result.status:
-                    result.status.hotel_code = hotel_code
-                    report.add_status(result.status)
-                
-                results.append(result)
-                
-                if progress_callback:
-                    progress = (i + idx + 1) / total_hotels
-                    progress_callback(progress)
-            
-            time.sleep(delay_between_emails * 2)
-        
-        return results, report
-        
-    except Exception as e:
-        error_result = EmailProcessingResult(
-            False, 
-            f"Bulk processing error: {str(e)}",
-            status=EmailStatus(
-                hotel_code="BATCH",
-                email_address="N/A",
-                timestamp=datetime.now(),
-                status="Failed",
-                message=str(e)
+        for i, hotel_code in enumerate(hotel_codes):
+            result = process_single_notification(
+                missing_df=missing_df,
+                emails_df=emails_df,
+                hotel_code=hotel_code,
+                smtp_settings=smtp_settings,
+                additional_info=additional_info,
+                delay=delay_between_emails,
+                from_email=from_email,
+                bcc_email=bcc_email,
+                force_template=force_template
             )
-        )
-        results.append(error_result)
-        report.add_status(error_result.status)
-        return results, report
+            
+            # Add status to report
+            status = EmailStatus(
+                hotel_code=hotel_code,
+                email_address=result.data['email'] if result.data else "N/A",
+                timestamp=datetime.now(),
+                status="Success" if result.success else "Failed",
+                message=result.message
+            )
+            report.add_status(status)
+            
+            if progress_callback:
+                progress = (i + 1) / total_hotels
+                progress_callback(progress)
+
+        return True, report
+
+    except Exception as e:
+        return False, f"Error in bulk processing: {str(e)}"
     finally:
-        if outlook:
-            cleanup_outlook(outlook)
+        if sender:
+            sender.close()
 
 def send_to_all_hotels(
     missing_df: pd.DataFrame,
@@ -585,24 +478,9 @@ def send_to_all_hotels(
     additional_info: str = "",
     batch_size: int = 10,
     delay_between_emails: float = 2.0,
-    progress_callback: Optional[callable] = None,
-    from_email: str = "",
-    bcc_email: Optional[str] = None,
-    force_template: Optional[str] = None
-) -> Tuple[List[EmailProcessingResult], EmailReport]:
-    """Send notifications to all hotels in the missing files list
-    
-    Args:
-        missing_df: DataFrame containing missing files data
-        emails_df: DataFrame containing email addresses
-        additional_info: Additional information to include in email
-        batch_size: Number of emails to send in each batch
-        delay_between_emails: Delay between email sends
-        progress_callback: Callback function to update progress
-        from_email: Email address to send from
-        bcc_email: Email address to BCC
-        force_template: Force specific template ("standard" or "critical")
-    """
+    progress_callback: Optional[callable] = None
+) -> Tuple[bool, EmailReport]:
+    """Send notifications to all hotels in the missing files list"""
     all_hotels = missing_df['prop_code'].unique().tolist()
     return process_bulk_notifications(
         missing_df=missing_df,
@@ -611,10 +489,7 @@ def send_to_all_hotels(
         additional_info=additional_info,
         batch_size=batch_size,
         delay_between_emails=delay_between_emails,
-        progress_callback=progress_callback,
-        from_email=from_email,
-        bcc_email=bcc_email,
-        force_template=force_template
+        progress_callback=progress_callback
     )
 
 def get_email_statistics(missing_df: pd.DataFrame) -> Dict[str, Any]:
