@@ -14,10 +14,13 @@ import sys
 
 if sys.platform == 'win32':
     try:
-        import win32com.client
+        import pythoncom
     except ImportError:
-        # Optional: Provide a friendly error or fallback
-        print("win32com is required on Windows!")
+        print("pythoncom module is not installed. Please install pywin32.")
+else:
+    # Optionally, provide alternative implementations or simply pass
+    print("Skipping pythoncom import because this is not a Windows environment.")
+
 
 
 image = r'C:\Users\mfsal575\Marriott International\EMEA Analytics - Documents\Analytics Repository\_python\ODC_Audit_Tracking\data\image001.png'
