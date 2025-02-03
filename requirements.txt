@@ -1,5 +1,4 @@
 pandas
 streamlit
-win32com
 datetime
 fpdf2
