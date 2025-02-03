@@ -1,5 +1,4 @@
 import pandas as pd
-import win32com.client as win32
 import pythoncom
 import time
 from datetime import datetime
@@ -10,6 +9,16 @@ try:
     FPDF_AVAILABLE = True
 except ImportError:
     FPDF_AVAILABLE = False
+
+import sys
+
+if sys.platform == 'win32':
+    try:
+        import win32com.client
+    except ImportError:
+        # Optional: Provide a friendly error or fallback
+        print("win32com is required on Windows!")
+
 
 image = r'C:\Users\mfsal575\Marriott International\EMEA Analytics - Documents\Analytics Repository\_python\ODC_Audit_Tracking\data\image001.png'
 
