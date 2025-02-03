@@ -13,13 +13,11 @@ except ImportError:
 import sys
 
 if sys.platform == 'win32':
-    try:
-        import pythoncom
-    except ImportError:
-        print("pythoncom module is not installed. Please install pywin32.")
+    import pythoncom
+    import win32com.client
 else:
-    # Optionally, provide alternative implementations or simply pass
-    print("Skipping pythoncom import because this is not a Windows environment.")
+    print("Skipping Windows-specific imports")
+
 
 
 
